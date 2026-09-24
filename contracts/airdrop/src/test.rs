@@ -1022,6 +1022,163 @@ fn test_verify_proof_all_same_hash_returns_false() {
     );
 }
 
+// ─── Issue #35: Snapshot / golden-value tests for Merkle root stability ────────
+
+/// Build a 5-leaf Merkle tree from the same fixed inputs used in the TypeScript
+/// SDK snapshot test, then assert the root equals the golden value.
+///
+/// If `leaf_hash` or `hash_pair` is ever accidentally changed in Rust, this test
+/// will catch the regression immediately — before a deployed contract becomes
+/// unclaimable.
+///
+/// Fixed inputs (same as sdk/src/merkle.test.ts SNAPSHOT_ENTRIES):
+///   GBTL47…   1 000
+///   GBIRYN…     500
+///   GCEEXC…     250
+///   GBBD47…  1 000 000
+///   GAYOLL…     750
+///
+/// Golden root:
+///   2e9199348f6c68ecbe1363de4ce5ad558803219458531acac7fb936fed722c6e
+///
+/// This value was produced by running the TypeScript SDK's `buildMerkleTree`
+/// with the same inputs and is pasted here verbatim — it is NOT computed by
+/// any Rust logic inside this test.
+#[test]
+fn test_snapshot_5_entry_merkle_root() {
+    let env = Env::default();
+
+    let addr1 = Address::from_str(&env, "GBTL47RTFR5EKMZSXWOQU735WBK7LRPPDIDK3JTNTCZZ7NUBBRDTVSK2");
+    let addr2 = Address::from_str(&env, "GBIRYNFBULFVEHPRNOZENOG6RZ4ZPTRDLR7HNMRKHV2QHISIDHOYV6ZN");
+    let addr3 = Address::from_str(&env, "GCEEXCCX6TVKCYJ4MFIE3M2NJPVPGRSRPIHDDXR43XKNTNBADWOQWDYC");
+    let addr4 = Address::from_str(&env, "GBBD47IF6LWK7P7MDEVSCWR7DPUWV3NY3DTQEVFL4NAT4AQH3ZLLFLA5");
+    let addr5 = Address::from_str(&env, "GAYOLLLUIZE4DZMBB2ZBKGBUBZLIOYU6XFLW37GBP2VZD3ABNXCW4BVA");
+
+    // Compute leaves in canonical order (same as TypeScript SDK input order).
+    let leaf1 = merkle::leaf_hash(&env, &addr1, 1_000);
+    let leaf2 = merkle::leaf_hash(&env, &addr2, 500);
+    let leaf3 = merkle::leaf_hash(&env, &addr3, 250);
+    let leaf4 = merkle::leaf_hash(&env, &addr4, 1_000_000);
+    let leaf5 = merkle::leaf_hash(&env, &addr5, 750);
+
+    // ── Assert individual golden leaf hashes ──────────────────────────────────
+    // Each expected value was produced by the TypeScript SDK's leafHash() and
+    // pasted verbatim.
+
+    let expected_leaf1 = BytesN::from_array(&env, &hex_decode_32("f0ca9a176c3553e6f05548ac5dbc4e723432ff28aef31c1739f48e3d81c19c2c"));
+    let expected_leaf2 = BytesN::from_array(&env, &hex_decode_32("b1667e647698cb414b8732f3d5aedb70defadc32978128beee876edbdbf1dad1"));
+    let expected_leaf3 = BytesN::from_array(&env, &hex_decode_32("76ba95f738b7d03b0fa7194e9a9e6325ef263f6cef8a9335a169ac48c03ae336"));
+    let expected_leaf4 = BytesN::from_array(&env, &hex_decode_32("7c7175b951be4c0bc42331708840f397c148788c8911a7cf1b0622f288b3a6ce"));
+    let expected_leaf5 = BytesN::from_array(&env, &hex_decode_32("011c5b03792cf8cce71f827379d29ccde9679e86cdf7e9f2f33fb24152a6737a"));
+
+    assert_eq!(leaf1, expected_leaf1, "leaf1 (GBTL47, 1000) mismatch");
+    assert_eq!(leaf2, expected_leaf2, "leaf2 (GBIRYN, 500) mismatch");
+    assert_eq!(leaf3, expected_leaf3, "leaf3 (GCEEXC, 250) mismatch");
+    assert_eq!(leaf4, expected_leaf4, "leaf4 (GBBD47, 1_000_000) mismatch");
+    assert_eq!(leaf5, expected_leaf5, "leaf5 (GAYOLL, 750) mismatch");
+
+    // ── Build the 5-leaf tree matching TypeScript SDK layer-by-layer logic ────
+    //
+    //  Layer 0 (leaves): [leaf1, leaf2, leaf3, leaf4, leaf5]
+    //  Layer 1 (pairs):  [pair(leaf1,leaf2), pair(leaf3,leaf4), leaf5]
+    //  Layer 2 (pairs):  [pair(pair12, pair34), leaf5]
+    //  Layer 3 (root):   pair(pair1234, leaf5)
+    //
+    // This is the same pairing strategy as the TypeScript SDK:
+    //   - pair i with i+1; if odd node remains, promote unchanged.
+
+    let pair12 = merkle_pair(&env, leaf1.clone(), leaf2.clone());
+    let pair34 = merkle_pair(&env, leaf3.clone(), leaf4.clone());
+    let pair1234 = merkle_pair(&env, pair12, pair34);
+    let root = merkle_pair(&env, pair1234, leaf5.clone());
+
+    // ── Assert the golden root ─────────────────────────────────────────────────
+    let expected_root = BytesN::from_array(
+        &env,
+        &hex_decode_32("2e9199348f6c68ecbe1363de4ce5ad558803219458531acac7fb936fed722c6e"),
+    );
+
+    assert_eq!(
+        root, expected_root,
+        "5-entry Merkle root does not match the golden value from the TypeScript SDK. \
+         This means leafHash() or hash_pair() has diverged — all deployed contracts \
+         will become unclaimable if this change is shipped."
+    );
+
+    // ── Verify all 5 proofs round-trip through verify_proof ───────────────────
+    // proof for leaf1: [leaf2, pair34, leaf5]
+    let mut proof1: Vec<BytesN<32>> = Vec::new(&env);
+    proof1.push_back(leaf2.clone());
+    proof1.push_back(merkle_pair(&env, leaf3.clone(), leaf4.clone()));
+    proof1.push_back(leaf5.clone());
+    assert!(
+        merkle::verify_proof(&env, &root, leaf1.clone(), &proof1),
+        "proof for addr1 should verify against golden root"
+    );
+
+    // proof for leaf2: [leaf1, pair34, leaf5]
+    let mut proof2: Vec<BytesN<32>> = Vec::new(&env);
+    proof2.push_back(leaf1.clone());
+    proof2.push_back(merkle_pair(&env, leaf3.clone(), leaf4.clone()));
+    proof2.push_back(leaf5.clone());
+    assert!(
+        merkle::verify_proof(&env, &root, leaf2.clone(), &proof2),
+        "proof for addr2 should verify against golden root"
+    );
+
+    // proof for leaf3: [leaf4, pair12, leaf5]
+    let mut proof3: Vec<BytesN<32>> = Vec::new(&env);
+    proof3.push_back(leaf4.clone());
+    proof3.push_back(merkle_pair(&env, leaf1.clone(), leaf2.clone()));
+    proof3.push_back(leaf5.clone());
+    assert!(
+        merkle::verify_proof(&env, &root, leaf3.clone(), &proof3),
+        "proof for addr3 should verify against golden root"
+    );
+
+    // proof for leaf4: [leaf3, pair12, leaf5]
+    let mut proof4: Vec<BytesN<32>> = Vec::new(&env);
+    proof4.push_back(leaf3.clone());
+    proof4.push_back(merkle_pair(&env, leaf1.clone(), leaf2.clone()));
+    proof4.push_back(leaf5.clone());
+    assert!(
+        merkle::verify_proof(&env, &root, leaf4.clone(), &proof4),
+        "proof for addr4 should verify against golden root"
+    );
+
+    // proof for leaf5: [pair1234]  (promoted odd node at layer 1; pair of the layer-2 pair)
+    let pair12_for5 = merkle_pair(&env, leaf1.clone(), leaf2.clone());
+    let pair34_for5 = merkle_pair(&env, leaf3.clone(), leaf4.clone());
+    let pair1234_for5 = merkle_pair(&env, pair12_for5, pair34_for5);
+    let mut proof5: Vec<BytesN<32>> = Vec::new(&env);
+    proof5.push_back(pair1234_for5);
+    assert!(
+        merkle::verify_proof(&env, &root, leaf5.clone(), &proof5),
+        "proof for addr5 should verify against golden root"
+    );
+}
+
+/// Decode a 64-char lowercase hex string into a [u8; 32] array.
+/// Used only in snapshot tests to keep expected values as readable hex literals.
+fn hex_decode_32(hex: &str) -> [u8; 32] {
+    assert_eq!(hex.len(), 64, "expected exactly 64 hex chars");
+    let mut out = [0u8; 32];
+    for (i, chunk) in hex.as_bytes().chunks(2).enumerate() {
+        let hi = hex_nibble(chunk[0]);
+        let lo = hex_nibble(chunk[1]);
+        out[i] = (hi << 4) | lo;
+    }
+    out
+}
+
+fn hex_nibble(b: u8) -> u8 {
+    match b {
+        b'0'..=b'9' => b - b'0',
+        b'a'..=b'f' => b - b'a' + 10,
+        _ => panic!("invalid hex nibble: {}", b as char),
+    }
+}
+
 // ─── Issue #43: Persistent TTL refresh on is_claimed ───────────────────────
 
 /// is_claimed() must return true even after many ledger advances if the entry

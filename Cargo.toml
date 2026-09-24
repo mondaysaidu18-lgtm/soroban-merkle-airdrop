@@ -1,6 +1,10 @@
 [workspace]
 resolver = "2"
 members = ["contracts/airdrop"]
+# fuzz is excluded from default builds (cargo build / cargo test from the root)
+# so it does not interfere with WASM compilation.
+# Run `cargo fuzz run verify_proof` from the repo root to use it.
+exclude = ["fuzz"]
 
 [workspace.dependencies]
 soroban-sdk = { version = "27.0.6" }

@@ -1,0 +1,20 @@
+[package]
+name = "soroban-merkle-airdrop-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2021"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+soroban-merkle-airdrop = { path = "../contracts/airdrop" }
+soroban-sdk = { version = "27.0.6", features = ["testutils"] }
+
+# Prevent this from interfering with the workspace default members
+[[bin]]
+name = "verify_proof"
+path = "fuzz_targets/verify_proof.rs"
+test = false
+doc = false
